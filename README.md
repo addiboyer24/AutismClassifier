@@ -1,2 +1,2 @@
 # AutismClassifier
-Decision tree classifier for Autism - Computational Medicine
+Decision tree classifier for ASD - Computational Medicine
