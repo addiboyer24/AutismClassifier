@@ -186,7 +186,7 @@ def lowest_entropy_partition(data, data_partitions):
     
     return split_question, split_score, lowest
 
-def select_k_lowest_features(data, k):
+def select_k_lowest_features(data, k, cost_function='Entropy'):
     features = set()
     q = Queue()
     q.enqueue(data)
@@ -199,8 +199,13 @@ def select_k_lowest_features(data, k):
             
             if(len(features) == k):
                 break
-                
-            feature, value, _ = lowest_entropy_partition(data, data_partitions)
+            feature, value = None, None
+            
+            if(cost_function == 'Entropy'):
+                feature, value, _ = lowest_entropy_partition(data, data_partitions)
+            elif(cost_function == 'Gini'):
+                feature, value, _ = lowest_gini_split(data, data_partitions)
+            
             if(feature != None):
                 features.add(feature)
                 a, b = partition_data(data, feature, value)
@@ -425,5 +430,228 @@ def get_sensitivity(confusion_matrix):
 
 def get_specificity(confusion_matrix):
     return confusion_matrix[0, 0] / sum(confusion_matrix[0, :])
+
+
+def gini_index(data):
+    LABEL_IDX = -1
+    mappings = {'asd': 1, 'non-asd':0, 0:0, 1:1}
+    unique, counts = np.unique(data[:, LABEL_IDX], return_counts=True)
+    
+    total = sum(counts)
+    gini_score = 1 - np.sum((counts / total)**2) # 1 - sum(p_i)^2
+    
+    return gini_score
+
+def weighted_gini_score(a, b):
+    n = a.shape[0] + b.shape[0]
+    
+    p_a, p_b = a.shape[0] / n, b.shape[0] / n
+    
+    gini_a, gini_b = gini_index(a), gini_index(b)
+    
+    return p_a*gini_a + p_b*gini_b
+
+def sorted_gini_splits(data, partitions, k):
+    
+    split_to_gini = defaultdict(float)
+    
+    for question, values in partitions.items():
+        for score in values:
+            a,b = partition_data(data, question, score)
+            gini_score = weighted_gini_score(a,b)
+            
+            split_to_gini[(question, score)] = gini_score
+    
+    return sorted(split_to_gini.items(), key=lambda x:x[1])[0:k]
+    
+def lowest_gini_split(data, partitions):
+    
+    lowest = np.inf
+    winning_score = None
+    winning_question = None
+    
+    for question, values in partitions.items():
+        for score in values:
+            a,b = partition_data(data, question, score)
+            
+            gini_score = weighted_gini_score(a,b)
+            
+            if(gini_score < lowest):
+                lowest = gini_score
+                winning_score = score
+                winning_question = question
+                
+            
+    return winning_question, winning_score, lowest
+
+
+def cart_algorithm(data, features=None):
+    
+    if(is_single_class(data)):
+        return classify(data)
+    
+    
+    partitions = get_data_partitions(data, features)
+    question, value, gini = lowest_gini_split(data, partitions)
+    
+    # no way to further split the data
+    if(question is None):
+        return classify(data)
+    
+    a,b = partition_data(data, question, value)
+    
+    node = TreeNode(feature=question, value=value)
+    
+    node.yes = cart_algorithm(a, features)
+    node.no = cart_algorithm(b, features)
+    
+    return node
+
+def run_trials(num_trials, min_feature, max_feature, cost_function='Entropy'):
+    
+    feature_to_sensitivity = defaultdict(list)
+    feature_to_specificity = defaultdict(list)
+    feature_to_accuracy = defaultdict(list)
+    feature_to_uar = defaultdict(list)
+    
+    trees = defaultdict(list)
+    trees_g = defaultdict(list)
+    for trial in range(num_trials):
+        '''
+        if(trial % 100 == 0):
+        
+        print("Trial %d" % (trial + 1))
+        '''
+        # read data, perform cleaning, upsampling, etc..
+        train, test, data_train, data_test, child_to_index_train, child_to_index_test = get_train_test()
+        
+        for num_features in range(min_feature, max_feature + 1):
+
+            # get k most important features
+            features = select_k_lowest_features(data_train, k=num_features)
+            #print(num_features)
+
+            # build decision tree, get root back in tree
+            tree = None
+            if(cost_function == 'Entropy'):
+                tree = get_decision_tree(data_train, features=features)
+            elif(cost_function == 'Gini'):
+                tree = cart_algorithm(data_train, features=features)
+            
+            trees[num_features].append(tree)
+            # get graphical representation of decision tree
+            tree_g = bfs(tree)
+            trees_g[num_features].append(tree_g)
+
+            # validate model on test data
+            pred_test = get_predictions(tree, data_test)
+
+            pred_test = child_to_prediction_validate(child_to_index_test, pred_test)
+
+            actual_test = get_child_to_prediction(child_to_index_test, test)
+
+            pred = np.array(list(pred_test.values())).reshape(len(actual_test), 1)
+
+            actual = np.array(list(actual_test.values())).reshape(len(actual_test), 1)
+
+            # get the confusion matrix
+            c_matrix = confusion_matrix(pred, actual)
+
+            # get sensitivity, specificity, accuracy, and unweighted average recall
+            sensitivity = get_sensitivity(c_matrix)
+
+            specificity = get_specificity(c_matrix)
+
+            accuracy = validate_votes(actual_test, pred_test)
+            
+            uar = (sensitivity + specificity) / 2
+            
+            feature_to_sensitivity[num_features].append(sensitivity)
+            feature_to_specificity[num_features].append(specificity)
+            feature_to_accuracy[num_features].append(accuracy)
+            feature_to_uar[num_features].append(uar)
+    
+    
+    return feature_to_sensitivity, feature_to_specificity, feature_to_accuracy, feature_to_uar, trees, trees_g
+
+
+def confidence_interval_95(values):
+    z = 1.960
+    x_mean = np.mean(values)
+    x_std = np.std(values)
+    n = len(values)
+    
+    confidence = z * (x_std / np.sqrt(n))
+    
+    return confidence
+
+def generate_performance_plots(feature_to_sensitivity, feature_to_specificity, feature_to_accuracy, feature_to_uar, cost_function):
+    x, y = [], []
+    ubs, lbs = [], []
+    for num_feature, values in sorted(feature_to_specificity.items(), key=lambda x:x[0]):
+        x.append(num_feature)
+        y.append(np.mean(values))
+        confidence = confidence_interval_95(values)
+        ubs.append(np.mean(values) + confidence)
+        lbs.append(np.mean(values) - confidence)
+
+    plt.plot(x, y, marker=',', linewidth=3, color='red')
+    plt.fill_between(x, ubs, lbs, color='green', alpha=.10)
+    plt.xlabel("# features")
+    plt.ylabel("Percent (%)")
+    plt.title("Specificity with {}".format(cost_function))
+    plt.grid(color='lightgray')
+    plt.show()
+
+    x, y = [], []
+    ubs, lbs = [], []
+    for num_feature, values in sorted(feature_to_sensitivity.items(), key=lambda x:x[0]):
+        x.append(num_feature)
+        y.append(np.mean(values))
+        confidence = confidence_interval_95(values)
+        ubs.append(np.mean(values) + confidence)
+        lbs.append(np.mean(values) - confidence)
+
+    plt.plot(x, y, marker=',', linewidth=3, color='red')
+    plt.fill_between(x, ubs, lbs, color='green', alpha=.10)
+    plt.xlabel("# features")
+    plt.ylabel("Percent (%)")
+    plt.title("Sensitivity with {}".format(cost_function))
+    plt.grid(color='lightgray')
+    plt.show()
+
+    x, y = [], []
+    ubs, lbs = [], []
+    for num_feature, values in sorted(feature_to_uar.items(), key=lambda x:x[0]):
+        x.append(num_feature)
+        y.append(np.mean(values))
+        confidence = confidence_interval_95(values)
+        ubs.append(np.mean(values) + confidence)
+        lbs.append(np.mean(values) - confidence)
+
+    plt.plot(x, y, marker=',', linewidth=3, color='red')
+    plt.fill_between(x, ubs, lbs, color='green', alpha=.10)
+    plt.xlabel("# features")
+    plt.ylabel("Percent (%)")
+    plt.title("Unweighted Average Recall with {}".format(cost_function))
+    plt.grid(color='lightgray')
+    plt.show()
+
+    x, y = [], []
+    ubs, lbs = [], []
+    for num_feature, values in sorted(feature_to_accuracy.items(), key=lambda x:x[0]):
+        x.append(num_feature)
+        y.append(np.mean(values))
+        confidence = confidence_interval_95(values)
+        ubs.append(np.mean(values) + confidence)
+        lbs.append(np.mean(values) - confidence)
+
+    plt.plot(x, y, marker=',', linewidth=3, color='red')
+    plt.fill_between(x, ubs, lbs, color='green', alpha=.10)
+    plt.xlabel("# features")
+    plt.ylabel("Percent (%)")
+    plt.title("Accuracy with {}".format(cost_function))
+    plt.grid(color='lightgray')
+    plt.show()
 
 
