@@ -774,9 +774,9 @@ def get_random_decision_tree(data, features=None, probabilities=None):
     if(is_single_class(data)):
         return classify(data)
     else:
-        # get question, and cutoff with lowest overall entropy
+        # get question, and cutoff at random either uniformly, or with probability distribution
         data_partitions = get_data_partitions(data, features)
-        split_question, split_value = random_partition(data_partitions)
+        split_question, split_value = random_partition(data_partitions, probabilities)
         
         # no way to split the data with given features.. so return best guess
         if(split_question == None):
@@ -843,12 +843,8 @@ def random_forest_trials(num_trees, num_trials, min_feature, max_feature, cost_f
                 if(probabilities is None):
                     features = select_k_lowest_features(data_train, num_features, cost_function)
                 
-                if(cost_function == 'Entropy'):
-                    tree = get_random_decision_tree(data_train, features, probabilities)
-                    forest.append(tree)
-                elif(cost_function == 'Gini'):
-                    tree = random_cart_algorithm(data_train, features, probabilities)
-                    forest.append(tree)
+                tree = get_random_decision_tree(data_train, features, probabilities)
+                forest.append(tree)
 
             voted_preds, actual = get_forest_classification(test, data_test, forest, child_to_index_test)
             
